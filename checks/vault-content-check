@@ -1,0 +1,91 @@
+#!/usr/bin/env python3
+"""Read-only baseline structural checks for a Personal-Brain repository."""
+
+from __future__ import annotations
+import os, re, sys
+from collections import defaultdict
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+SKIP = {".git", ".obsidian", "__pycache__"}
+VALID_STATUS = {"draft", "live", "locked", "superseded", "closed"}
+VALID_STAGE = {"idea", "planning", "active", "waiting", "parked", "complete"}
+EXPECTED = {"idea":"draft","planning":"draft","active":"live","waiting":"live","parked":"draft","complete":"closed"}
+LINK = re.compile(r"\[\[([^\]]+)\]\]")
+
+def iter_notes():
+    notes=[]
+    for d, dirs, names in os.walk(ROOT):
+        dirs[:] = [x for x in dirs if x not in SKIP and not x.startswith(".")]
+        notes += [Path(d)/n for n in names if n.endswith(".md")]
+    return notes
+
+def rel(p): return p.relative_to(ROOT).as_posix()
+
+def frontmatter(text):
+    lines=text.splitlines()
+    if not lines or lines[0].strip()!="---": return {}
+    out={}
+    for line in lines[1:]:
+        if line.strip()=="---": break
+        if ":" in line and not line[:1].isspace():
+            k,v=line.split(":",1); out[k.strip()]=v.strip().strip("'\"")
+    return out
+
+def target(raw):
+    return raw.split("|",1)[0].split("#",1)[0].strip().removesuffix(".md").strip("/")
+
+def show(label, items, error=False):
+    if not items:
+        print("ok      "+label); return
+    print(("error   " if error else "warn    ")+label+": "+str(len(items)))
+    for item in items[:15]: print("        - "+item)
+
+def main():
+    notes=iter_notes()
+    by_key={rel(p)[:-3]:p for p in notes}
+    by_name=defaultdict(list)
+    for p in notes: by_name[p.stem].append(p)
+    meta={p:frontmatter(p.read_text(encoding="utf-8",errors="replace")) for p in notes}
+
+    missing=[]; invalid=[]; lifecycle=[]; unresolved=[]
+    for p,m in meta.items():
+        rp=p.relative_to(ROOT)
+        if rp.parts and rp.parts[0] in {"Archive","Inbox","Sessions","Templates"}: continue
+        if p.name in {"README.md","INSTALL.md","CUSTOM-INSTRUCTIONS.md"}: continue
+        if not m: continue
+        miss=[k for k in ("type","status","updated") if not m.get(k)]
+        if miss: missing.append(f"{rel(p)}: missing {', '.join(miss)}")
+        if m.get("status") and m["status"] not in VALID_STATUS:
+            invalid.append(f"{rel(p)}: status {m['status']}")
+        if m.get("stage") and m["stage"] not in VALID_STAGE:
+            invalid.append(f"{rel(p)}: stage {m['stage']}")
+        if m.get("stage") in EXPECTED and m.get("status") and EXPECTED[m["stage"]]!=m["status"]:
+            lifecycle.append(f"{rel(p)}: {m['stage']} expects {EXPECTED[m['stage']]}, found {m['status']}")
+
+    for p in notes:
+        rp=p.relative_to(ROOT)
+        if rp.parts and rp.parts[0] in {"Archive","Sessions"}: continue
+        for raw in LINK.findall(p.read_text(encoding="utf-8",errors="replace")):
+            t=target(raw)
+            if not t or "<" in t: continue
+            keys=[t,(rp.parent/ t).as_posix()]
+            matches=[by_key[k] for k in keys if k in by_key]
+            if not matches and "/" not in t: matches=by_name.get(t,[])
+            if not matches: unresolved.append(f"{rel(p)} -> [[{raw}]]")
+
+    print("Personal-Brain baseline health:")
+    show("core metadata",sorted(missing))
+    show("lifecycle vocabulary",sorted(invalid),True)
+    show("stage/status agreement",sorted(lifecycle),True)
+    show("unresolved wikilinks",sorted(set(unresolved)))
+    errors=invalid+lifecycle
+    print()
+    if errors:
+        print(f"Found {len(errors)} lifecycle error(s).")
+        return 1
+    print("No lifecycle vocabulary errors found.")
+    return 0
+
+if __name__=="__main__":
+    sys.exit(main())
